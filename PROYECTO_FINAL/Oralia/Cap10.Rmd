@@ -1,0 +1,523 @@
+---
+title: "Statistical Text Processing"
+author: "Santiago Santos Oralia"
+date: "28 abril 2025"
+output: html_document
+---
+
+Este capítulo aborda cómo aprovechar el texto no estructurado de Internet para análisis cuantitativos, usando técnicas de **procesamiento de lenguaje natural (PLN)** en R. Aunque R no está optimizado para texto a gran escala, se utilizan paquetes como **tm** y **RTextTools** para preparar y analizar datos.
+
+Se explican dos enfoques principales:
+
+1.  **Métodos supervisados**: clasifican texto usando ejemplos previamente etiquetados.
+
+2.  **Métodos no supervisados**: identifican categorías automáticamente sin necesidad de etiquetas previas.
+
+#### El ejemplo práctico: Clasificación de comunicados de prensa del gobierno británico
+
+Como ejemplo práctico la **clasificación de comunicados de prensa del gobierno británico** publicados antes de julio de 2010. Se seleccionan 747 documentos desde el sitio oficial, considerando la agencia emisora como referencia del contenido. Este conjunto de datos etiquetados servirá para evaluar la precisión de los métodos de clasificación de texto explicados más adelante.
+
+Hemos elegido los comunicados de prensa del gobierno del Reino Unido como caso de prueba. Los datos pueden encontrarse en:
+
+<https://www.gov.uk/government/announcements>
+
+Para recolectar los 747 comunicados de prensa del sitio web del gobierno británico, se deben seguir las páginas mediante los enlaces "Siguiente página", ya que el HTML de una sola página no contiene todos los resultados. Se recomienda guardar primero los datos localmente como buena práctica de *web scraping*, y luego construir un corpus de texto con `tm`. El proceso se automatiza usando código que recorre cada página y extrae los enlaces correspondientes.
+
+```{r}
+library(RCurl)
+library(XML)
+library(stringr)
+library(tm)
+library(topicmodels)
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(httr)
+library(rvest)
+library(stringr)
+```
+
+Para descargar todos los comunicados de prensa, es necesario indicar la ubicación de los certificados de seguridad (CA), ya que los datos provienen de un servidor HTTPS.
+
+```{r}
+
+url <- "https://www.gov.uk/government/announcements?announcement_type_option=press-releases&departments[]=all&from_date=&keywords=&to_date=01%2F07%2F2010&topics[]=all&world_locations[]=all&page=1"
+resp <- GET(url)
+
+# Verificar si la respuesta fue correcta
+if (status_code(resp) == 200) {
+  html <- read_html(resp)
+  
+  # Filtrar solo los enlaces de los comunicados de prensa
+  press_links <- html %>%
+    html_nodes("li a[href*='/government/news']") %>%   
+    html_attr("href")
+  
+  # Mostrar los primeros 10 enlaces de comunicados de prensa
+  if (length(press_links) > 0) {
+    cat("Enlaces encontrados:\n")
+    print(head(press_links, 10))
+  } else {
+    cat("No se encontraron enlaces de comunicados de prensa.\n")
+  }
+} else {
+  cat("Error al cargar la página\n")
+}
+
+
+#Directorio para guardar los comunicados
+dir.create("Press_Releases", showWarnings = FALSE)
+
+# Base URL
+base_url <- "https://www.gov.uk"
+
+# Descargar cada comunicado de prensa
+conflicts(detail = TRUE)
+for (i in 1:length(press_links)) {
+  # Verifica si el enlace ya incluye la base del URL
+  if (substr(press_links[i], 1, 1) == "/") {
+    full_url <- paste0(base_url, press_links[i])
+  } else {
+    full_url <- press_links[i]
+  }
+  
+  cat("Descargando comunicado:", full_url, "\n")
+  
+  resp <- try(httr::GET(full_url), silent = TRUE)
+  
+  if (inherits(resp, "try-error") || httr::status_code(resp) != 200) {
+    cat("Error al acceder al comunicado", i, "\n")
+    next
+  }
+  
+  # Verificar tipo de contenido
+  if (httr::http_type(resp) != "text/html") {
+    cat("El contenido no es HTML para el comunicado", i, "\n")
+    next
+  }
+  
+  # Leer el contenido HTML de la página
+  html <- httr::content(resp, as = "text", encoding = "UTF-8")
+  
+  # Guardar el  HTML en un archivo
+  file_path <- file.path("Press_Releases", paste0(i, ".html"))
+  writeLines(html, file_path)
+}
+```
+
+```{r}
+cat("Total de archivos descargados:", length(list.files("Press_Releases")), "\n")
+list.files("Press_Releases")[1:3]
+
+```
+
+```{r}
+tmp <- readLines("Press_Releases/1.html",warn = FALSE)
+tmp <- str_c(tmp, collapse = "")
+tmp <- htmlParse(tmp)
+parsed_html <- tmp
+
+release <- xpathSApply(parsed_html, "//div[contains(@class,'govspeak')]", xmlValue)
+
+
+
+# Extraer el contenido con XPath
+title <- xpathSApply(parsed_html, "//title", xmlValue)
+title_text <- ifelse(length(title) > 0, title, "No disponible")
+
+# Este es el contenedor principal del texto del comunicado
+release <- xpathSApply(parsed_html, "//div[contains(@class,'govspeak')]", xmlValue)
+release_text <- ifelse(length(release) > 0, release, "No disponible")
+
+# Extraer la fecha 
+publication_date <- xpathSApply(parsed_html, "//meta[@name='pubdate']", xmlGetAttr, "content")
+if (length(publication_date) == 0) {
+  fecha_raw <- xpathSApply(parsed_html, "//div[contains(@class,'metadata') or contains(@class,'meta-data')]//text()", xmlValue)
+  fecha_raw <- paste(fecha_raw, collapse = " ")
+  fecha_extraida <- str_extract(fecha_raw, "Published\\s+\\d{1,2}\\s+\\w+\\s+\\d{4}")
+  publication_date <- ifelse(!is.na(fecha_extraida), str_remove(fecha_extraida, "Published\\s+"), "No disponible")
+}
+date_text <- ifelse(length(publication_date) > 0, publication_date, "No disponible")
+
+
+# Extraer la organización (si aparece)
+organisation <- xpathSApply(parsed_html, "//*[contains(@class,'organisation')]", xmlValue)
+org_text <- ifelse(length(organisation) > 0, organisation[1], "No disponible")
+
+
+cat(xpathSApply(parsed_html, "//body", xmlValue))
+
+#Mostrar resultados
+cat("Título:", title, "\n")
+cat("Fecha de publicación:", ifelse(length(publication_date) > 0, publication_date, "No disponible"), "\n")
+cat("Organización:", ifelse(length(organisation) > 0, organisation, "No disponible"), "\n")
+cat("Fragmento del contenido:\n", substr(release, 1, 300), "\n")
+
+release_corpus <- VCorpus(VectorSource(c(release)))
+
+meta(release_corpus[[1]], "organisation") <- org_text
+meta(release_corpus[[1]], "publication_date") <- date_text
+
+# Verificá
+meta(release_corpus[[1]])
+
+
+
+
+# Obtener la lista de archivos HTML reales
+files <- list.files("Press_Releases/", pattern = "\\.html$", full.names = TRUE)
+
+
+```
+
+Para descargar todos los comunicados de prensa, iteramos sobre nuestro vector de resultados.
+
+El corpus puede manipularse como una lista convencional en R. Para acceder a documentos individuales,
+
+El corpus puede accederse como una lista normal, especificando el nombre del objeto (`release_corpus`) y el subíndice del elemento que nos interese entre dobles corchetes. Hasta ahora, solo hemos almacenado un elemento en nuestro corpus
+
+```{r}
+n <- 0
+for (i in seq_along(files)) {
+  cat("Procesando:", files[i], "\n")
+  
+  tmp <- try(readLines(files[i], warn = FALSE), silent = TRUE)
+  if (inherits(tmp, "try-error")) next
+  
+  tmp <- paste(tmp, collapse = "")
+  parsed <- try(htmlParse(tmp, asText = TRUE), silent = TRUE)
+  if (inherits(parsed, "try-error")) next
+  
+  release <- xpathSApply(parsed, "//div[contains(@class, 'govspeak')]", xmlValue)
+  organisation <- xpathSApply(parsed, "//span[@class='organisation lead']", xmlValue)
+  publication <- xpathSApply(parsed, "//dd[@class='change-notes']", xmlValue)
+  
+  if (length(release) != 0) {
+    n <- n + 1
+    tmp_corpus <- VCorpus(VectorSource(release))
+    
+    # Agregar metadatos de forma segura
+    org_text <- if (length(organisation) > 0) organisation[1] else "Desconocida"
+    pub_text <- if (length(publication) > 0) publication[1] else "No disponible"
+    
+    meta(tmp_corpus[[1]], "organisation") <- org_text
+    meta(tmp_corpus[[1]], "publication") <- pub_text
+    meta(tmp_corpus[[1]], "file") <- basename(files[i])
+    
+    # Concatenar al corpus general
+    if (n == 1) {
+      release_corpus <- tmp_corpus
+    } else {
+      release_corpus <- c(release_corpus, tmp_corpus)
+    }
+  }
+}
+
+release_corpus
+```
+
+Los metadatos de los documentos son accesibles mediante una función común, incluyendo campos preestablecidos como Autor e Idioma que a veces se autocompletan. Entre los metadatos personalizados destacan la fecha y entidad emisora del comunicado. El proceso automatizado:
+
+```{r}
+# Extraer metadatos del corpus
+meta_data <- data.frame(
+  organisation = sapply(release_corpus, function(doc) {
+    org <- meta(doc, "organisation")
+    if (length(org) == 0) NA else org
+  }),
+  publication = sapply(release_corpus, function(doc) {
+    pub <- meta(doc, "publication")
+    if (length(pub) == 0) NA else pub
+  }),
+  stringsAsFactors = FALSE
+)
+
+# Mostrar los primeros registros para verificar
+head(meta_data)
+```
+
+```{r}
+table(as.character(meta_data[, "organisation"]))
+
+```
+
+La función del paquete `tm` para convertir un corpus de texto en una matriz término-documento es `TermDocumentMatrix()`. Al aplicar esta función a nuestro corpus de comunicados de prensa, obtenemos:
+
+```{r}
+tdm <- TermDocumentMatrix(release_corpus)
+tdm
+
+```
+
+La matriz resultante es extremadamente dispersa, lo que significa que la mayoría de las celdas no contienen ningún valor (aproximadamente el 90%). Además, al inspeccionar con más detalle los términos en las filas, encontramos que varios son errores que probablemente se remontan a fuentes de datos no depuradas.
+
+**Limpieza de datos**\
+**Eliminación de palabras**
+
+Para corregir estos errores, normalmente se ejecutan varias operaciones de preparación de ndefineddatos. Estas acciones también abordan algunas de las críticas comunes hacia la clasificación texto (semi)automatizada, que discutiremos en la siguiente sección.
+
+para eliminar caracteres de puntuación
+
+```{r}
+release_corpus <- tm_map(release_corpus, removeNumbers)
+
+release_corpus <- tm_map(release_corpus, content_transformer(function(x) {
+  str_replace_all(x, pattern = "[[:punct:]]", replacement = " ")
+}))
+
+```
+
+Otra operación común en el preprocesamiento de texto es la eliminación de las llamadas *palabras vacías*. Estas son:
+
+-   **Definición**:
+
+    -   Las palabras más frecuentes de un idioma (artículos, preposiciones, conjunciones)
+
+    -   Aparecen con similar frecuencia en todos los textos
+
+-   **Propósito de su eliminación**:
+
+    -   **No aportan** valor temático: Su distribución uniforme no ayuda a distinguir categorías
+
+    -   Principal beneficio: **Optimización computacional** (reducen dimensión de la matriz)
+
+    -   Impacto secundario: Puede mejorar marginalmente la calidad del modelo
+
+<!-- -->
+
+-   Incluye una lista predefinida con **más de 100 términos** en inglés
+
+```{r}
+
+length(stopwords("en"))
+stopwords("en")[1:10]
+
+```
+
+Nuevamente, eliminamos estas [palabras vacías] utilizando la función `tm_map()`.
+
+```{r}
+release_corpus <- tm_map(release_corpus, removeWords, words =
+                           stopwords("en"))
+```
+
+Un paso habitual en el preprocesamiento de texto es convertir todas las letras a **minúsculas**. Esto asegura que:
+
+-   Las palabras al **inicio de oraciones** (que normalmente llevan mayúscula inicial)
+
+-   No se traten como **tokens diferentes** por los algoritmos
+
+```{r}
+release_corpus <- Corpus(VectorSource(release_corpus))
+```
+
+**Stemming**
+
+El siguiente paso tiene mayor relevancia que los preprocesamientos mencionados anteriormente. En análisis estadísticos de texto, es común aplicar stemming antes del procesamiento, que consiste en:
+
+**Qué hace el stemming:**
+
+-   Reduce las palabras a su **raíz léxica** (stem)
+
+-   Agrupa términos derivados de una misma raíz
+
+    -   Ejemplo: "correr", "corriendo", "corrió" → "corr"
+
+```{r}
+release_corpus <- tm_map(release_corpus, content_transformer(tolower))  
+release_corpus <- tm_map(release_corpus, removeWords, stopwords("en"))  
+release_corpus <- tm_map(release_corpus, content_transformer(stemDocument))  
+
+release_corpus <- tm_map(release_corpus, content_transformer(function(x) {  
+  stringr::str_replace_all(x, "[[:punct:]]", " ")  
+})) 
+```
+
+La lista de términos ahora está considerablemente más depurada y observamos un valor más realista para el parámetro
+
+```{r}
+class(release_corpus)  
+tdm <- TermDocumentMatrix(release_corpus)  
+
+# Si release_corpus es character, reconstrúyelo  
+if (is.character(release_corpus)) {  
+  release_corpus <- Corpus(VectorSource(release_corpus))  
+}  
+
+# Aplica transformaciones  
+release_corpus <- tm_map(release_corpus, content_transformer(tolower))  
+release_corpus <- tm_map(release_corpus, removeWords, stopwords("en"))  
+release_corpus <- tm_map(release_corpus, content_transformer(stemDocument))  
+
+# Crea la matriz término-documento  
+tdm <- TermDocumentMatrix(release_corpus)  
+tdm
+
+
+
+tdm <- removeSparseTerms(tdm, 0.95)
+tdm
+```
+
+Un cuestionamiento frecuente al análisis estadístico de texto es su **desatención a la estructura y el contexto.**
+
+El primer punto mencionado es especialmente relevante, ya que la carga computacional aumenta proporcionalmente al tamaño de la matriz. De hecho, dependiendo de la tarea específica, la precisión de la clasificación no mejora significativamente con este enfoque. Además, algunos de los problemas mencionados anteriormente no son tan graves.
+
+El significado puede depender de secuencias de palabras\*\* (no de términos aislados)
+
+-   **Definición**: Combinaciones de 2 palabras consecutivas
+
+-   Ejemplo (en "María tenía un corderito"):
+
+    -   Bigramas: "María tenía", "tenía un", "un corderito"
+
+```{r}
+BigramTokenizer <- function(x){
+      NGramTokenizer(x, Weka_control(min = 2, max = 2))}
+  tdm_bigram <- TermDocumentMatrix(release_corpus,
+                                    control = list(
+                                      tokenize =
+                                        BigramTokenizer))
+
+  tdm_bigram
+```
+
+```{r}
+findAssocs(tdm, "nuclear", .7)
+  
+```
+
+**Supervised learning techniques**
+
+Government press releases
+
+Al implementar el análisis práctico, primero debemos reorganizar los
+datos para adaptarlos a los requisitos del paquete RTextTools. Este
+paquete requiere como entrada una **matriz documento-término** (en contraste con la matriz término-documento que generamos previamente).
+
+```{r}
+ #Create Document-Term Matrix
+  dtm <- DocumentTermMatrix(release_corpus)
+  n_docs <- length(release_corpus)
+  max_terms_to_keep <- 10  
+  safe_sparse <- ifelse(n_docs <= max_terms_to_keep, 0.95, 1-(max_terms_to_keep/n_docs))
+  dtm_reduced <- removeSparseTerms(dtm, safe_sparse)
+  dtm_reduced
+  
+   library(RTextTools)
+  dummy_labels <- rep(c("Grupo1", "Grupo2"), length.out = nrow(dtm_reduced))
+```
+
+Para completar la preparación de datos, generamos un contenedor integrado con toda la información necesaria para los procedimientos de estimación. Esto se realiza mediante la función `create_container()` del paquete RTextTools
+
+```{r}
+container <- create_container(
+    dtm_reduced,  
+    labels = dummy_labels,  
+    trainSize = 1:nrow(dtm_reduced),
+    testSize = NULL,
+    virgin = FALSE
+  )
+
+ print_algorithms()
+```
+
+El contenedor resultante es un objeto de clase S4 (`matrix_container`) que almacena todos los componentes necesarios para los métodos de aprendizaje supervisado.
+
+```{r}
+slotNames(container)
+
+```
+
+Utilizamos la información almacenada en nuestro contenedor para entrenar los modelos de clasificación.
+
+```{r}
+svm_model <- train_model(container, "SVM")
+  tree_model <- train_model(container, "TREE") 
+  
+  svm_out <- classify_model(container, svm_model)
+  tree_out <- classify_model(container, tree_model)
+  
+  head(svm_out)  
+  head(tree_out)
+```
+
+Dado que contamos con las categorías reales de los comunicados, podemos evaluar el desempeño de los algoritmos mediante
+
+```{r}
+labels_out <- data.frame(
+    document_id = 401:nrow(dtm_reduced),
+    svm = as.character(svm_out[,1]),
+    tree = as.character(tree_out[,1]),
+    stringsAsFactors = F)
+  
+  table(labels_out[,1] == labels_out[,2])
+  
+  prop.table(table(labels_out[,1] == labels_out[,2]))
+  
+  table(labels_out[,1] == labels_out[,3])
+  
+  prop.table(table(labels_out[,1] == labels_out[,3]))
+  
+  
+```
+
+**Unsupervised learning techniques**
+
+Ahora aplicaremos el **Análisis Latente Dirichlet (LDA)**, un enfoque no supervisado para descubrir temas ocultos en los textos.
+
+Identificar los términos más probables para cada tema mediante:
+
+-   **Tema 1**: Mayoritariamente asociado al *Ministerio de Defensa*
+
+-   **Tema 2**: Predomina en publicaciones del *Departamento de Negocios, Innovación y Competencias*
+
+-   **Tema 5**: Alta probabilidad de aparición en anuncios de la *Oficina de Asuntos Exteriores*
+
+```{r}
+num_topics <- 5
+lda_model <- LDA(dtm, k = num_topics, control = list(seed = 1234))
+
+# top 10 palabras por tema
+terms(lda_model, 10)  
+
+
+# más probable a cada documento
+topic_assignments <- topics(lda_model)
+
+ctm_out <- CTM(dtm, 6)
+
+terms(ctm_out, 10)
+```
+
+```{r}
+posterior_ctm <- posterior(ctm_out)
+ctm_topics <- data.frame(t(posterior_ctm$topics))
+
+par(mfrow = c(2, 2),  
+    cex.main = 0.8, 
+    pty = "s", 
+    mar = c(5, 5, 1, 1))
+
+for(topic in 1:2) {
+  for(group in c("Grupo1", "Grupo2")) {
+    # Get data for this topic-group combination
+    tmp.data <- ctm_topics[topic, dummy_labels == group]
+    
+    # Only plot if there are documents in this group
+    if(length(tmp.data) > 0) {
+      plot(
+        1:length(tmp.data),
+        sort(as.numeric(tmp.data)),
+        type = "l",
+        ylim = c(0, 1),
+        xlab = "Documentos (ordenados)",
+        ylab = paste("Prob. Tema", topic),
+        main = paste("Grupo:", group, "- Tema", topic),
+        col = ifelse(group == "Grupo1", "blue", "red"),
+        lwd = 2
+      )
+    }
+  }
+}
+```
